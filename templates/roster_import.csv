@@ -1,3 +1,3 @@
-First name,Last name,Grade,Teacher,Family / household,Parent email,OneCause name (if different),Active (Y/N)
-Sofia,Garcia,K,Ms. Alvarez,Garcia (Maria),maria@example.org,,Y
-Mateo,Garcia,3,Mr. Carter,Garcia (Maria),maria@example.org,Matt Garcia,Y
+First name,Last name,Grade,Teacher,OneCause name (only if different)
+Sofia,Garcia,K,Ms. Alvarez,
+Mateo,Garcia,3,Mr. Carter,Matt Garcia
