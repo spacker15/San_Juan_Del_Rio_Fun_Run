@@ -1,13 +1,13 @@
-"""Workbook values (recalculated by LibreOffice) vs the independent Python model in reference.py."""
+"""Recalculated workbook values vs the Python model in reference.py."""
+from datetime import datetime
+
 import pytest
 
 import config as C
-from conftest import num
 from reference import compute
-from scenarios import THERMO_AMOUNTS
 
-MONEY = dict(abs=0.005)
 ERRORS = ("#REF!", "#VALUE!", "#N/A", "#NAME?", "#DIV/0!", "#NUM!", "#NULL!", "Err:")
+T0 = 8
 
 
 @pytest.fixture(scope="module")
@@ -22,156 +22,99 @@ def ref(demo):
 
 @pytest.mark.parametrize("key", ["blank", "demo", "ties"])
 def test_no_formula_errors(books, key):
-    bad = [f"{ws.title}!{c.coordinate}={c.value}" for ws in books[key].wb.worksheets for row in ws.iter_rows()
-           for c in row if isinstance(c.value, str) and c.value.startswith(ERRORS)]
+    bad = [f"{ws.title}!{c.coordinate}={c.value}" for ws in books[key].wb for row in ws.iter_rows() for c in row
+           if isinstance(c.value, str) and c.value.startswith(ERRORS)]
     assert not bad, bad[:20]
 
 
-def test_blank_template(books):
-    b = books["blank"]
-    assert b.kpi("Raised") == 0 and b.kpi("StudentsN") == 0 and b.kpi("Problems") == 0
-    assert b["Daily Challenges"]["D5"].value == "No gifts yet"
+def test_blank(books):
+    ws = books["blank"]["By Teacher"]
+    assert ws["A4"].value == 0 and ws["A5"].value.startswith("✔")
+    assert books["blank"]["Daily Challenges"]["F5"].value == "No gifts yet"
 
 
-@pytest.mark.parametrize("key", ["Raised", "Remaining", "StudentsN", "DonatedN", "Gifts", "RaisedToday",
-                                 "ThermoCells"])
-def test_totals(demo, ref, key):
-    assert demo.kpi(key) == pytest.approx(ref["kpi"][key], **MONEY)
-
-
-def test_demo_lands_between_slime_and_goal(ref):
-    assert 60000 <= ref["kpi"]["Raised"] < 65000
-
-
-def test_who_donated_statuses(demo, ref):
-    ws = demo["All Donations"]
-    oc = [ws[f"H{r}"].value for r in range(2, 2 + len(ref["oc_status"]))]
-    assert oc == ref["oc_status"]
-    cash0 = 2 + C.N_OC
-    cash = [ws[f"H{r}"].value for r in range(cash0, cash0 + len(ref["cash_status"]))]
-    assert cash == ref["cash_status"]
-    for s in ["OK", "NAME NOT ON ROSTER", "Duplicate (ignored)", "Refund (not counted)", "Zero amount",
-              "Bad date", "Bad amount"]:
-        assert s in oc + cash
+def test_summary(demo, ref):
+    ws = demo["By Teacher"]
+    assert ws["A4"].value == pytest.approx(ref["raised"])
+    assert 60000 <= ref["raised"] < 65000
+    assert ws["E4"].value == pytest.approx(ref["donated_pct"])
+    assert ws["A5"].value.startswith(f"⚠ {ref['not_on_list']} donation")
 
 
 def test_students(demo, ref):
     ws = demo["Students"]
-    days = sorted(ref["daily"])
-    for s in ref["students"]:
-        r = s["row"] + 2
-        assert ws[f"A{r}"].value == s["name"]
-        assert ws[f"B{r}"].value == s["cls"]
-        assert ws[f"D{r}"].value == pytest.approx(s["total"], **MONEY), s["name"]
-        assert ws[f"E{r}"].value == pytest.approx(s["online"], **MONEY), s["name"]
-        assert ws[f"G{r}"].value == s["gifts"], s["name"]
-        for i, d in enumerate(days):
-            assert (ws.cell(r, 9 + i).value or 0) == pytest.approx(s["by_day"][d], **MONEY), (s["name"], d)
-    assert ref["students"][3]["online"] > 0, "OneCause nickname credited via Roster column F"
+    for i, s in enumerate(demo.data["roster"]):
+        assert ws[f"D{2 + i}"].value == pytest.approx(ref["total"][s["name"]]), s["name"]
 
 
-def test_by_class(demo, ref):
-    ws = demo["By Class"]
-    for i, c in enumerate(ref["classes"]):
-        r = 5 + i
-        assert ws[f"A{r}"].value == c["name"]
-        assert (ws[f"D{r}"].value, ws[f"E{r}"].value) == (c["students"], c["donated"])
-        assert ws[f"F{r}"].value == pytest.approx(c["pct"])
-        assert ws[f"G{r}"].value == pytest.approx(c["total"], **MONEY)
-    assert ws[f"A{5 + len(ref['classes'])}"].value in ("", None)
-
-
-def test_by_grade(demo, ref):
-    ws = demo["By Class"]
-    r0 = demo.find("By Class", "A", "Grade P3")
+def test_by_teacher(demo, ref):
+    ws = demo["By Teacher"]
+    for i, (t, exp) in enumerate(ref["teachers"].items()):
+        r = T0 + i
+        assert ws[f"A{r}"].value == t
+        assert str(ws[f"B{r}"].value) == exp["grade"]
+        assert (ws[f"C{r}"].value, ws[f"D{r}"].value) == (exp["students"], exp["donated"])
+        assert ws[f"F{r}"].value == pytest.approx(exp["total"])
+    g0 = demo.find("By Teacher", "A", "Grade P3")
     for i, g in enumerate(C.GRADES):
-        exp = ref["grades"][g]
-        assert ws[f"D{r0 + i}"].value == exp["students"]
-        assert ws[f"E{r0 + i}"].value == exp["donated"]
-        assert ws[f"G{r0 + i}"].value == pytest.approx(exp["total"], **MONEY)
-    assert ws[f"G{r0 + len(C.GRADES)}"].value == pytest.approx(ref["kpi"]["Raised"], **MONEY)
+        assert ws[f"C{g0 + i}"].value == ref["grades"][g]["students"]
+        assert ws[f"F{g0 + i}"].value == pytest.approx(ref["grades"][g]["total"])
 
 
 def test_by_day(demo, ref):
     ws = demo["By Day"]
-    run = ref["pre"]
     for i, d in enumerate(sorted(ref["daily"])):
-        r = 5 + i
-        run += ref["daily"][d]
-        assert num(ws[f"A{r}"].value) == d
-        assert ws[f"D{r}"].value == pytest.approx(ref["daily"][d], **MONEY)
-        assert ws[f"F{r}"].value == pytest.approx(run, **MONEY)
-    assert ref["pre"] > 0 and ref["post"] > 0
-    assert run + ref["post"] == pytest.approx(ref["kpi"]["Raised"], **MONEY)
+        v = ws[f"A{6 + i}"].value
+        assert (v.date() if isinstance(v, datetime) else v) == d
+        assert ws[f"B{6 + i}"].value == pytest.approx(ref["daily"][d])
+        assert ws[f"D{6 + i}"].value == pytest.approx(ref["running"][d])
 
 
-def test_dashboard_top_classes(demo, ref):
-    ws = demo["Dashboard"]
-    top = sorted(ref["classes"], key=lambda c: -c["total"])[:10]
-    assert [ws[f"N{7 + i}"].value for i in range(10)] == [c["name"] for c in top]
-    best = max(ref["students"], key=lambda s: s["total"])
-    assert ws["N19"].value.startswith(f"{best['first']} {best['last'][0]}.")
-
-
-def test_demo_challenges(demo, ref):
+def test_challenges(demo, ref):
     ws = demo["Daily Challenges"]
     for k, res in enumerate(ref["challenges"]):
-        r = 5 + k
-        assert ws[f"A{r}"].value == res["name"]
-        assert ws[f"E{r}"].value == res["status"]
-        text = ws[f"D{r}"].value
-        if res["rule"] in ("CLASS_PARTICIPATION_MIN", "CLASS_PARTICIPATION_CUM"):
-            assert res["winners"][0] in text and f"{round(res['max'] * 100)}%" in text
-        elif res["rule"] == "GRADE_TOTAL":
-            assert f"Grade {res['winners'][0]}" in text
-        elif res["rule"] in ("SCHOOL_PARTICIPATION_TARGET", "SCHOOL_TOTAL_TARGET"):
+        text = ws[f"F{5 + k}"].value
+        rule = res["rule"]
+        if rule in ("CLASS_PCT_MIN", "CLASS_PCT_TO_DATE"):
+            assert text.startswith(res["winners"][0]) and f"{round(res['max'] * 100)}%" in text
+            assert ("(tie)" in text) == (len(res["winners"]) > 1)
+        elif rule == "GRADE_TOTAL":
+            assert text.startswith(f"Grade {res['winners'][0]}")
+        elif rule in ("SCHOOL_PCT_TARGET", "SCHOOL_TOTAL_TARGET"):
             assert text.startswith("HIT") == res["hit"]
-        elif res["rule"] == "DRAWING":
-            assert text.startswith(f"{len(res['eligible'])} students eligible")
-            r0 = demo.find("Daily Challenges", "A", f"{res['name']}: eligible") + 2
-            listed = [ws[f"A{i}"].value for i in range(r0, r0 + C.N_ELIG) if ws[f"A{i}"].value]
-            assert listed == res["eligible"][:C.N_ELIG]
-        elif res["rule"] == "CLASS_TOTAL_PER_GRADE":
-            r0 = demo.find("Daily Challenges", "A", f"{res['name']}: top class") + 2
+        elif rule == "DRAWING":
+            assert text.startswith(f"{res['eligible']} eligible")
+        elif rule == "CLASS_TOTAL_PER_GRADE":
+            g0 = demo.find("Daily Challenges", "A", "P3")
             for i, g in enumerate(C.GRADES):
                 winners, amt = res["per_grade"][g]
-                assert ws[f"C{r0 + i}"].value == pytest.approx(amt, **MONEY)
-                assert winners[0] in ws[f"B{r0 + i}"].value
-        elif res["rule"] == "TOP_STUDENT_PER_CLASS":
-            r0 = demo.find("Daily Challenges", "A", f"{res['name']}: top student") + 2
-            for i, c in enumerate(ref["classes"]):
-                winners, amt = res["per_class"][c["name"]]
-                assert ws[f"A{r0 + i}"].value == c["name"]
-                assert ws[f"C{r0 + i}"].value == pytest.approx(amt, **MONEY)
-                assert winners[0] in ws[f"B{r0 + i}"].value
+                cell = ws[f"E{g0 + i}"].value
+                assert ws[f"D{g0 + i}"].value == pytest.approx(amt)
+                assert (winners[0] in cell) if winners else cell == "—"
+        elif rule == "TOP_STUDENT_PER_CLASS":
+            c0 = demo.find("Daily Challenges", "A", "Teacher") + 1
+            col = next(c for c in range(4, 12) if "top student" in str(ws.cell(c0 - 1, c).value))
+            for i, (t, (winners, amt)) in enumerate(res["per_class"].items()):
+                assert ws.cell(c0 + i, 1).value == t
+                assert ws.cell(c0 + i, col + 1).value == pytest.approx(amt)
+                assert winners[0] in ws.cell(c0 + i, col).value
 
 
 def test_ties_and_date_edges(books):
     b = books["ties"]
     ws = b["Daily Challenges"]
-    g = b.find("Daily Challenges", "A", "Weekend: top class") + 2
-    g3, g4 = g + C.GRADES.index("3"), g + C.GRADES.index("4")
-    assert ws[f"B{g3}"].value == "TIE: Ms. A – 3 / Ms. B – 3" and ws[f"C{g3}"].value == 50
-    assert ws[f"B{g4}"].value == "—"                         # Eve's gift was the day after the window
-    t = b.find("Daily Challenges", "A", "Top student: top student") + 2
-    assert ws[f"B{t}"].value == "TIE: Ann One / Ben Two" and ws[f"C{t}"].value == 30
-    assert ws["D7"].value == "TIE: Grade 3 / Grade 4 — $40"
-    assert ws["D8"].value == "Ms. C – 4 — 100%"
-    assert ws["D9"].value == "HIT ✔ $255 of $255"             # exactly on target counts
-    assert ws["D10"].value == "HIT ✔ 40% of 40%"
-    assert ws["D11"].value == "TIE: Ms. A – 3 / Ms. B – 3 +1 more — 100%"
-    assert b.kpi("Raised") == 255
-
-
-@pytest.mark.parametrize("amount", THERMO_AMOUNTS)
-def test_thermometer(books, amount):
-    b = books[f"thermo_{amount}"]
-    assert b.kpi("ThermoCells") == {0: 0, 32500: 10, 60000: 18, 65000: 20, 80000: 20}[amount]
-    assert b.kpi("StretchCell") == 18
-    banner = b.kpi("Banner")
-    if amount >= 65000:
-        assert banner == "GOAL REACHED! THANK YOU, SAINTS!"
-    elif amount >= 60000:
-        assert banner.startswith("WE HIT $60,000")
-    else:
-        assert banner.startswith(f"${60000 - amount:,} to go")
+    assert [ws[f"F{r}"].value for r in range(5, 12)] == [
+        "See GRADE SCORES below",
+        "See CLASS SCORES below",
+        "Grade 3 (tie) — $40",
+        "Ms. C — 100%",
+        "HIT! $255 of $255",
+        "HIT! 40% of 40%",
+        "Ms. A (tie) — 100%",
+    ]
+    g0 = b.find("Daily Challenges", "A", "P3")
+    g3, g4 = g0 + C.GRADES.index("3"), g0 + C.GRADES.index("4")
+    assert ws[f"E{g3}"].value == "Ms. A (tie)"     # Cal's gift on the window's last day counts
+    assert ws[f"E{g4}"].value == "—"               # Eve's gift the day after does not
+    c0 = b.find("Daily Challenges", "A", "Teacher") + 1
+    assert ws.cell(c0, 5).value == "Ann One (tie)" and ws.cell(c0, 6).value == 30

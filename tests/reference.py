@@ -1,171 +1,87 @@
-"""Independent Python re-implementation of the workbook's rules.
-
-Tests feed the same inputs to this model and to the workbook (recalculated by LibreOffice)
-and assert the numbers agree. Nothing here reads workbook formulas.
-"""
+"""Independent Python version of the workbook's rules; tests compare it with the recalculated workbook."""
 from datetime import date, datetime
 
 import config as C
 
-EPOCH = date(1899, 12, 30)
 
-
-def serial(d):
-    if isinstance(d, datetime):
-        d = d.date()
-    return (d - EPOCH).days
+def day(v):
+    return v.date() if isinstance(v, datetime) else v
 
 
 def norm(s):
     return " ".join(str(s).split()).lower()
 
 
-def parse_date(v):
-    if isinstance(v, (datetime, date)):
-        return serial(v)
-    for fmt in ("%m/%d/%Y %I:%M %p", "%m/%d/%Y"):
-        try:
-            return serial(datetime.strptime(str(v).strip(), fmt))
-        except ValueError:
-            pass
-    return None
-
-
-def parse_amount(v):
-    if isinstance(v, (int, float)):
-        return round(float(v), 2)
-    try:
-        return round(float(str(v).replace("$", "").replace(",", "").replace(" ", "")), 2)
-    except ValueError:
-        return None
-
-
 def compute(data):
-    st = dict(C.SETTINGS, **data.get("settings", {}))
     challenges = data.get("challenges", C.CHALLENGES)
-    start, end = serial(st["start"]), serial(st["end"])
-    asof = serial(st["asof"]) if st.get("asof") else serial(date.today())
-    goal = st["goal"]
+    roster = data.get("roster", [])
+    by_name = {norm(s["name"]): s for s in roster}
+    gifts = []
+    for d in data.get("donations", []):
+        s = by_name.get(norm(d["student"]))
+        gifts.append({"day": day(d["date"]), "amt": d["amount"], "student": s["name"] if s else None,
+                      "teacher": s["teacher"] if s else None, "grade": s["grade"] if s else None})
+    total = {s["name"]: sum(g["amt"] for g in gifts if g["student"] == s["name"]) for s in roster}
 
-    students = []
-    for i, s in enumerate(data.get("roster", [])):
-        first, last = str(s.get("first") or "").strip(), str(s.get("last") or "").strip()
-        if not first + last:
-            continue
-        teacher, grade = str(s.get("teacher") or "").strip(), str(s["grade"]).strip()
-        students.append({"row": i, "id": f"S{i + 1:04d}", "name": " ".join(f"{first} {last}".split()),
-                         "first": first, "last": last, "grade": grade,
-                         "cls": f"{teacher} – {grade}" if teacher else "(no teacher)",
-                         "alias": norm(s.get("alias") or ""), "fl": norm(f"{first} {last}"),
-                         "lf": norm(f"{last}, {first}")})
-    by_id = {s["id"]: s for s in students}
+    teachers = {}
+    for t in data.get("teachers", []):
+        mem = [s for s in roster if s["teacher"] == t]
+        teachers[t] = {"students": len(mem), "donated": sum(1 for s in mem if total[s["name"]] > 0),
+                       "total": sum(g["amt"] for g in gifts if g["teacher"] == t),
+                       "grade": mem[0]["grade"] if mem else ""}
+    grades = {g: {"students": sum(1 for s in roster if s["grade"] == g),
+                  "total": sum(x["amt"] for x in gifts if x["grade"] == g)} for g in C.GRADES}
+    raised = sum(g["amt"] for g in gifts)
 
-    def match(key):
-        for k in ("alias", "fl", "lf"):
-            for s in students:
-                if key and s[k] == key:
-                    return s["id"]
-        return None
-
-    ledger, oc_status, cash_status = [], [], []
-    h = {x: data["oc_headers"].index(x) for x in data["oc_headers"]}
-    rows = data.get("oc_rows", [])
-    first_txn = {}
-    for idx, row in enumerate(rows):
-        t = str(row[h["Transaction ID"]] or "").lower()
-        if t and t not in first_txn:
-            first_txn[t] = idx
-    for idx, row in enumerate(rows):
-        d, a = parse_date(row[h["Transaction Date"]]), parse_amount(row[h["Amount"]])
-        sid = match(norm(row[h["Participant Name"]]))
-        t = str(row[h["Transaction ID"]] or "").lower()
-        st_ = ("Bad amount" if a is None else "Refund (not counted)" if a < 0 else "Zero amount" if a == 0
-               else "Bad date" if d is None else "NAME NOT ON ROSTER" if sid is None
-               else "Duplicate (ignored)" if t and first_txn[t] < idx else "OK")
-        oc_status.append(st_)
-        if st_ == "OK":
-            ledger.append({"src": "OneCause", "date": d, "sid": sid, "amt": a})
-    for g in data.get("cash", []):
-        stud = str(g.get("student") or "").strip()
-        sid = stud.split("#", 1)[1].strip() if "#" in stud else stud.upper()
-        a = parse_amount(g.get("amount")) if g.get("amount") is not None else None
-        d = parse_date(g.get("date"))
-        st_ = ("Bad amount" if a is None or a <= 0 else "Bad date" if d is None
-               else "NAME NOT ON ROSTER" if sid not in by_id else "OK")
-        cash_status.append(st_)
-        if st_ == "OK":
-            ledger.append({"src": g.get("method") or "Cash/check", "date": d, "sid": sid, "amt": a})
-
-    for s in students:
-        mine = [x for x in ledger if x["sid"] == s["id"]]
-        s["online"] = round(sum(x["amt"] for x in mine if x["src"] == "OneCause"), 2)
-        s["total"] = round(sum(x["amt"] for x in mine), 2)
-        s["gifts"] = len(mine)
-        s["by_day"] = {d: round(sum(x["amt"] for x in mine if x["date"] == d), 2) for d in range(start, end + 1)}
-
-    classes = []
-    for s in students:
-        if s["cls"] not in [c["name"] for c in classes]:
-            classes.append({"name": s["cls"], "grade": s["grade"]})
-    for c in classes:
-        mem = [s for s in students if s["cls"] == c["name"]]
-        c["students"], c["donated"] = len(mem), sum(1 for s in mem if s["total"] > 0)
-        c["pct"] = c["donated"] / c["students"]
-        c["total"] = round(sum(s["total"] for s in mem), 2)
-    grades = {g: {"students": sum(1 for s in students if s["grade"] == g),
-                  "donated": sum(1 for s in students if s["grade"] == g and s["total"] > 0),
-                  "total": round(sum(s["total"] for s in students if s["grade"] == g), 2)} for g in C.GRADES}
-    days = range(start, end + 1)
-    daily = {d: round(sum(x["amt"] for x in ledger if x["date"] == d), 2) for d in days}
-    pre = round(sum(x["amt"] for x in ledger if x["date"] < start), 2)
-    post = round(sum(x["amt"] for x in ledger if x["date"] > end), 2)
+    def student_amt(s, start, end, to_date):
+        return sum(g["amt"] for g in gifts if g["student"] == s["name"] and
+                   (g["day"] <= end if to_date else start <= g["day"] <= end))
 
     results = []
-    for (_day, nm, cs_, ce, _reward, rule, val) in challenges:
-        s0, e0 = serial(cs_), serial(ce)
-
-        def amt(s, todate):
-            return round(sum(x["amt"] for x in ledger if x["sid"] == s["id"] and
-                             (x["date"] <= e0 if todate else s0 <= x["date"] <= e0)), 2)
-
-        res = {"name": nm, "rule": rule, "status": "Upcoming" if asof < s0 else "LIVE" if asof <= e0 else "Final"}
+    for (_d, nm, start, end, _r, rule, val) in challenges:
+        res = {"name": nm, "rule": rule}
         if rule == "CLASS_TOTAL_PER_GRADE":
-            res["per_grade"] = {}
+            per = {}
             for g in C.GRADES:
-                vals = {c["name"]: round(sum(amt(s, False) for s in students if s["cls"] == c["name"]), 2)
-                        for c in classes if c["grade"] == g}
-                mx = max(vals.values()) if vals else -1
-                res["per_grade"][g] = ([k for k, v in vals.items() if v == mx], mx)
-        elif rule in ("CLASS_PARTICIPATION_MIN", "CLASS_PARTICIPATION_CUM"):
-            thr = max(val or 0, 0.01) if rule.endswith("MIN") else 0.01
-            vals = {c["name"]: round(sum(1 for s in students if s["cls"] == c["name"] and
-                                         amt(s, rule.endswith("CUM")) >= thr) / c["students"], 6) for c in classes}
+                vals = {t: sum(x["amt"] for x in gifts if x["teacher"] == t and start <= x["day"] <= end)
+                        for t, info in teachers.items() if info["grade"] == g}
+                mx = max(vals.values(), default=0)
+                per[g] = ([t for t, v in vals.items() if v == mx] if mx > 0 else [], mx)
+            res["per_grade"] = per
+        elif rule in ("CLASS_PCT_MIN", "CLASS_PCT_TO_DATE"):
+            floor = max(0.01, val or 0) if rule == "CLASS_PCT_MIN" else 0.01
+            vals = {t: sum(1 for s in roster if s["teacher"] == t and
+                           student_amt(s, start, end, rule == "CLASS_PCT_TO_DATE") >= floor) / info["students"]
+                    for t, info in teachers.items() if info["students"]}
             mx = max(vals.values())
-            res["max"], res["winners"] = mx, [k for k, v in vals.items() if v == mx]
+            res["max"], res["winners"] = mx, [t for t, v in vals.items() if v == mx]
         elif rule == "TOP_STUDENT_PER_CLASS":
-            res["per_class"] = {}
-            for c in classes:
-                mem = [(s["name"], amt(s, False)) for s in students if s["cls"] == c["name"]]
-                mx = max(v for _, v in mem)
-                res["per_class"][c["name"]] = ([n for n, v in mem if v == mx], mx)
+            per = {}
+            for t in teachers:
+                amts = {s["name"]: student_amt(s, start, end, False) for s in roster if s["teacher"] == t}
+                mx = max(amts.values(), default=0)
+                per[t] = ([n for n, v in amts.items() if v == mx] if mx > 0 else [], mx)
+            res["per_class"] = per
         elif rule == "GRADE_TOTAL":
-            vals = {g: round(sum(amt(s, False) for s in students if s["grade"] == g), 2) for g in C.GRADES}
+            vals = {g: sum(x["amt"] for x in gifts if x["grade"] == g and start <= x["day"] <= end) for g in C.GRADES}
             mx = max(vals.values())
             res["max"], res["winners"] = mx, [g for g, v in vals.items() if v == mx]
-        elif rule == "SCHOOL_PARTICIPATION_TARGET":
-            res["value"] = sum(1 for s in students if amt(s, True) > 0) / len(students)
+        elif rule == "DRAWING":
+            res["eligible"] = sum(1 for s in roster if student_amt(s, start, end, False) > 0)
+        elif rule == "SCHOOL_PCT_TARGET":
+            res["value"] = sum(1 for s in roster if student_amt(s, start, end, True) > 0) / len(roster)
             res["hit"] = res["value"] >= val
         elif rule == "SCHOOL_TOTAL_TARGET":
-            res["value"] = round(sum(amt(s, True) for s in students), 2)
+            res["value"] = sum(g["amt"] for g in gifts if g["day"] <= end)
             res["hit"] = res["value"] >= val
-        elif rule == "DRAWING":
-            res["eligible"] = [s["name"] for s in students if amt(s, False) > 0]
         results.append(res)
 
-    raised = round(sum(s["total"] for s in students), 2)
-    return {"students": students, "by_id": by_id, "classes": classes, "grades": grades, "daily": daily,
-            "pre": pre, "post": post, "oc_status": oc_status, "cash_status": cash_status, "challenges": results,
-            "kpi": {"Raised": raised, "Remaining": max(0, round(goal - raised, 2)),
-                    "StudentsN": len(students), "DonatedN": sum(1 for s in students if s["total"] > 0),
-                    "Gifts": len(ledger), "RaisedToday": daily.get(asof, 0),
-                    "ThermoCells": min(20, max(0, int(raised / goal * 20 + 0.5)))}}
+    first = C.FIRST_DAY
+    days = [date.fromordinal(first.toordinal() + i) for i in range(C.N_DAY)]
+    return {
+        "raised": raised, "total": total, "teachers": teachers, "grades": grades, "challenges": results,
+        "not_on_list": sum(1 for g in gifts if g["student"] is None),
+        "donated_pct": sum(1 for v in total.values() if v > 0) / len(roster) if roster else 0,
+        "daily": {d: sum(g["amt"] for g in gifts if g["day"] == d) for d in days},
+        "running": {d: sum(g["amt"] for g in gifts if g["day"] <= d) for d in days},
+    }

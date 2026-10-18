@@ -1,10 +1,9 @@
-"""Build each scenario workbook, recalculate them all in one LibreOffice call, share the results."""
+"""Build the test workbooks, recalculate them in one LibreOffice call, share the results."""
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
-from datetime import date, datetime
 
 import openpyxl
 import pytest
@@ -17,12 +16,7 @@ import build_workbook  # noqa: E402
 import demo_data  # noqa: E402
 import scenarios  # noqa: E402
 
-SCENARIOS = {
-    "blank": lambda: {},
-    "demo": demo_data.generate,
-    "ties": scenarios.ties,
-    **{f"thermo_{a}": (lambda a=a: scenarios.thermo(a)) for a in scenarios.THERMO_AMOUNTS},
-}
+SCENARIOS = {"blank": dict, "demo": demo_data.generate, "ties": scenarios.ties}
 
 
 class Book:
@@ -33,28 +27,12 @@ class Book:
     def __getitem__(self, sheet):
         return self.wb[sheet]
 
-    def kpi(self, nm):
-        ws = self.wb["Calc"]
-        for r in range(2, ws.max_row + 1):
-            if ws[f"A{r}"].value == nm:
-                return ws[f"B{r}"].value
-        raise KeyError(nm)
-
     def find(self, sheet, col, text):
-        """Row of the first cell in col whose value starts with text."""
         ws = self.wb[sheet]
         for r in range(1, ws.max_row + 1):
-            if str(ws[f"{col}{r}"].value or "").startswith(text):
+            if str(ws[f"{col}{r}"].value or "") == text:
                 return r
         raise KeyError(text)
-
-
-def num(v):
-    if isinstance(v, datetime):
-        return (v.date() - date(1899, 12, 30)).days
-    if isinstance(v, date):
-        return (v - date(1899, 12, 30)).days
-    return v
 
 
 @pytest.fixture(scope="session")
@@ -68,5 +46,5 @@ def books():
         datas[key] = make()
         paths.append(build_workbook.build(os.path.join(tmp, f"{key}.xlsx"), datas[key]))
     subprocess.run(["soffice", "--headless", "--calc", "--convert-to", "xlsx", "--outdir", out, *paths],
-                   check=True, capture_output=True, timeout=1800)
+                   check=True, capture_output=True, timeout=900)
     return {k: Book(os.path.join(out, f"{k}.xlsx"), datas[k]) for k in SCENARIOS}
